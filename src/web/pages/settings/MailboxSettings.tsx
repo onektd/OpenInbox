@@ -7,7 +7,7 @@ import { del, get, patch, post, put, api, errorText } from '../../lib/api';
 import { useAction, useInvalidate } from '../../lib/hooks';
 import { cleanSignature } from '../../lib/sanitize';
 import { cn, downloadBlob } from '../../lib/utils';
-import { streamMbox, formatMboxEntry } from '../../lib/mbox';
+import { streamMbox, formatMboxEntry, parseGmailLabels } from '../../lib/mbox';
 import { LABEL_COLORS } from '../../../shared/constants';
 import type { Label, Mailbox } from '../../lib/types';
 import { Button } from '../../components/ui/button';
@@ -396,9 +396,18 @@ function ImportExport({ box }: { box: Mailbox }) {
             setProgress(`Scanning ${file.name} (${pct}%) — ${done} imported…`);
           })) {
             try {
-              setProgress(`Importing message ${msg.index} from ${file.name}…`);
-              const query = msg.isInbox ? '?folder=inbox' : '?folder=archive';
-              const r = await api<{ status: string }>(`/mailboxes/${box.id}/import${query}`, {
+              const folderLabel = msg.targetFolder === 'inbox' ? 'Inbox' : msg.targetFolder === 'trash' ? 'Trash' : msg.targetFolder === 'spam' ? 'Spam' : 'Archive';
+              setProgress(`Importing message ${msg.index} (${folderLabel}) from ${file.name}…`);
+              
+              const params = new URLSearchParams({ folder: msg.targetFolder });
+              if (msg.customLabels.length > 0) {
+                params.set('labels', msg.customLabels.join(','));
+              }
+              if (msg.isStarred) {
+                params.set('starred', '1');
+              }
+
+              const r = await api<{ status: string }>(`/mailboxes/${box.id}/import?${params}`, {
                 raw: new Blob([msg.bytes as BlobPart], { type: 'message/rfc822' }),
                 headers: { 'Content-Type': 'message/rfc822' },
               });
@@ -413,7 +422,17 @@ function ImportExport({ box }: { box: Mailbox }) {
           // Standard single .eml file
           setProgress(`Importing ${done + 1} of ${files.length}…`);
           try {
-            const r = await api<{ status: string }>(`/mailboxes/${box.id}/import?folder=archive`, {
+            const arrayBuf = await file.arrayBuffer();
+            const labelsInfo = parseGmailLabels(new Uint8Array(arrayBuf));
+            const params = new URLSearchParams({ folder: labelsInfo.targetFolder });
+            if (labelsInfo.customLabels.length > 0) {
+              params.set('labels', labelsInfo.customLabels.join(','));
+            }
+            if (labelsInfo.isStarred) {
+              params.set('starred', '1');
+            }
+
+            const r = await api<{ status: string }>(`/mailboxes/${box.id}/import?${params}`, {
               raw: file,
               headers: { 'Content-Type': 'message/rfc822' },
             });

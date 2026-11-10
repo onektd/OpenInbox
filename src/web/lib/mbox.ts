@@ -11,8 +11,12 @@ export interface MboxMessage {
   offset: number;
   /** Sequential message index (1-based) */
   index: number;
-  /** Whether the message indicates it belongs in Inbox according to Gmail labels */
-  isInbox?: boolean;
+  /** Destination folder based on Gmail system labels */
+  targetFolder: 'inbox' | 'archive' | 'trash' | 'spam';
+  /** Custom user tags/labels */
+  customLabels: string[];
+  /** Whether the message is starred */
+  isStarred: boolean;
 }
 
 /**
@@ -63,14 +67,86 @@ function cleanMboxMessage(rawBytes: Uint8Array): Uint8Array {
 }
 
 /**
- * Checks headers for X-Gmail-Labels containing 'Inbox'
+ * Gmail system labels that should not be created as custom tags
  */
-function checkIsInbox(bytes: Uint8Array): boolean {
-  const headerSlice = bytes.subarray(0, Math.min(bytes.length, 2048));
+const GMAIL_SYSTEM_LABELS = new Set([
+  'inbox',
+  'archive',
+  'trash',
+  'bin',
+  'spam',
+  'starred',
+  'unread',
+  'read',
+  'opened',
+  'important',
+  'sent',
+  'draft',
+  'drafts',
+  'chats',
+  'chat',
+  'muted',
+  'category personal',
+  'category social',
+  'category updates',
+  'category forums',
+  'category promotions',
+]);
+
+export interface GmailLabelsInfo {
+  targetFolder: 'inbox' | 'archive' | 'trash' | 'spam';
+  customLabels: string[];
+  isStarred: boolean;
+}
+
+/**
+ * Parses Gmail labels and tags from raw message headers.
+ */
+export function parseGmailLabels(bytes: Uint8Array): GmailLabelsInfo {
+  // Read first 4KB for headers
+  const headerSlice = bytes.subarray(0, Math.min(bytes.length, 4096));
   const text = new TextDecoder().decode(headerSlice);
-  const match = text.match(/X-Gmail-Labels:[^\r\n]+/i);
-  if (!match) return false;
-  return /\b(Inbox|INBOX)\b/i.test(match[0]);
+
+  // X-Gmail-Labels can be multiline folded (RFC 2822: continuation lines start with space/tab)
+  const match = text.match(/X-Gmail-Labels:\s*([^\r\n]+(?:\r?\n[ \t]+[^\r\n]+)*)/i);
+  if (!match) {
+    return { targetFolder: 'archive', customLabels: [], isStarred: false };
+  }
+
+  // Unfold and split by commas
+  const unfolded = match[1].replace(/\r?\n[ \t]+/g, ' ');
+  const rawLabels = unfolded
+    .split(',')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const lowerSet = new Set(rawLabels.map((l) => l.toLowerCase()));
+
+  // 1. Determine folder: Trash > Spam > Inbox > Archive
+  let targetFolder: 'inbox' | 'archive' | 'trash' | 'spam' = 'archive';
+  if (lowerSet.has('trash') || lowerSet.has('bin') || lowerSet.has('^k')) {
+    targetFolder = 'trash';
+  } else if (lowerSet.has('spam') || lowerSet.has('^s')) {
+    targetFolder = 'spam';
+  } else if (lowerSet.has('inbox') || lowerSet.has('^i')) {
+    targetFolder = 'inbox';
+  }
+
+  // 2. Starred status
+  const isStarred = lowerSet.has('starred') || lowerSet.has('^t');
+
+  // 3. User custom labels (filter out system labels and internal ^ tags)
+  const customLabels: string[] = [];
+  for (const label of rawLabels) {
+    const l = label.toLowerCase();
+    if (l.startsWith('^')) continue;
+    if (GMAIL_SYSTEM_LABELS.has(l)) continue;
+    if (!customLabels.includes(label)) {
+      customLabels.push(label);
+    }
+  }
+
+  return { targetFolder, customLabels, isStarred };
 }
 
 /**
@@ -177,11 +253,14 @@ export async function* streamMbox(
 
         messageIndex++;
         const cleaned = cleanMboxMessage(stripEnvelopeHeader(fullMsg));
+        const labelsInfo = parseGmailLabels(cleaned);
         yield {
           bytes: cleaned,
           offset: messageStartOffset,
           index: messageIndex,
-          isInbox: checkIsInbox(cleaned),
+          targetFolder: labelsInfo.targetFolder,
+          customLabels: labelsInfo.customLabels,
+          isStarred: labelsInfo.isStarred,
         };
 
         const envelopeLineStart = nextDelim + delimLen;
@@ -231,11 +310,14 @@ export async function* streamMbox(
       }
       messageIndex++;
       const cleaned = cleanMboxMessage(stripEnvelopeHeader(fullMsg));
+      const labelsInfo = parseGmailLabels(cleaned);
       yield {
         bytes: cleaned,
         offset: messageStartOffset,
         index: messageIndex,
-        isInbox: checkIsInbox(cleaned),
+        targetFolder: labelsInfo.targetFolder,
+        customLabels: labelsInfo.customLabels,
+        isStarred: labelsInfo.isStarred,
       };
     }
   }
