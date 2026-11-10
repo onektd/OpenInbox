@@ -9,9 +9,10 @@ export function useMailboxes() {
   return useQuery({ queryKey: ['mailboxes'], queryFn: () => get<Mailbox[]>('/mailboxes'), staleTime: 60_000 });
 }
 
-interface Page {
+export interface Page {
   threads: ThreadSummary[];
   nextCursor: string | null;
+  total?: number;
 }
 
 export function useThreads(mailbox: string, view: string, q: string) {
@@ -19,7 +20,7 @@ export function useThreads(mailbox: string, view: string, q: string) {
     queryKey: ['threads', mailbox, view, q],
     queryFn: ({ pageParam }) =>
       view === 'search'
-        ? get<{ threads: ThreadSummary[] }>(`/search?mailbox=${mailbox}&q=${encodeURIComponent(q)}`).then((r) => ({ threads: r.threads, nextCursor: null }) as Page)
+        ? get<{ threads: ThreadSummary[]; total: number }>(`/search?mailbox=${mailbox}&q=${encodeURIComponent(q)}`).then((r) => ({ threads: r.threads, nextCursor: null, total: r.total }) as Page)
         : get<Page>(`/threads?mailbox=${mailbox}&${viewQuery(view)}${pageParam ? `&cursor=${pageParam}` : ''}`),
     initialPageParam: '',
     getNextPageParam: (last) => last.nextCursor ?? undefined,
@@ -32,6 +33,17 @@ export function useThread(id: number | null) {
 }
 
 export type Action = 'read' | 'unread' | 'star' | 'unstar' | 'archive' | 'inbox' | 'spam' | 'notspam' | 'trash' | 'delete' | 'snooze' | 'unsnooze' | 'label' | 'unlabel' | 'assign';
+
+export interface ThreadActionOpts {
+  labelId?: number;
+  until?: number;
+  userId?: number | null;
+  allInView?: boolean;
+  mailbox?: string;
+  view?: string;
+  query?: string;
+  excludedThreadIds?: number[];
+}
 
 const REMOVES: Record<string, (view: string) => boolean> = {
   archive: (v) => v !== 'archive' && v !== 'allmail' && !v.startsWith('label-') && v !== 'sent' && v !== 'starred',
@@ -47,31 +59,33 @@ const REMOVES: Record<string, (view: string) => boolean> = {
 // Applies an action with an optimistic cache update, then refetches.
 export function useThreadActions() {
   const qc = useQueryClient();
-  return async (ids: number[], action: Action, opts: { labelId?: number; until?: number; userId?: number | null } = {}) => {
-    const lists = qc.getQueriesData<InfiniteData<Page>>({ queryKey: ['threads'] });
-    for (const [key, data] of lists) {
-      if (!data) continue;
-      const view = String((key as unknown[])[2]);
-      qc.setQueryData<InfiniteData<Page>>(key, {
-        ...data,
-        pages: data.pages.map((p) => ({
-          ...p,
-          threads: p.threads
-            .filter((t) => !(ids.includes(t.id) && REMOVES[action]?.(view)))
-            .map((t) => {
-              if (!ids.includes(t.id)) return t;
-              if (action === 'read') return { ...t, unreadCount: 0 };
-              if (action === 'unread') return { ...t, unreadCount: Math.max(1, t.unreadCount) };
-              if (action === 'star' || action === 'unstar') return { ...t, starred: action === 'star' };
-              if (action === 'label' && opts.labelId) return { ...t, labels: [...new Set([...t.labels, opts.labelId])] };
-              if (action === 'unlabel' && opts.labelId) return { ...t, labels: t.labels.filter((l) => l !== opts.labelId) };
-              return t;
-            }),
-        })),
-      });
+  return async (ids: number[], action: Action, opts: ThreadActionOpts = {}) => {
+    if (!opts.allInView) {
+      const lists = qc.getQueriesData<InfiniteData<Page>>({ queryKey: ['threads'] });
+      for (const [key, data] of lists) {
+        if (!data) continue;
+        const view = String((key as unknown[])[2]);
+        qc.setQueryData<InfiniteData<Page>>(key, {
+          ...data,
+          pages: data.pages.map((p) => ({
+            ...p,
+            threads: p.threads
+              .filter((t) => !(ids.includes(t.id) && REMOVES[action]?.(view)))
+              .map((t) => {
+                if (!ids.includes(t.id)) return t;
+                if (action === 'read') return { ...t, unreadCount: 0 };
+                if (action === 'unread') return { ...t, unreadCount: Math.max(1, t.unreadCount) };
+                if (action === 'star' || action === 'unstar') return { ...t, starred: action === 'star' };
+                if (action === 'label' && opts.labelId) return { ...t, labels: [...new Set([...t.labels, opts.labelId])] };
+                if (action === 'unlabel' && opts.labelId) return { ...t, labels: t.labels.filter((l) => l !== opts.labelId) };
+                return t;
+              }),
+          })),
+        });
+      }
     }
     try {
-      await post('/threads/actions', { threadIds: ids, action, ...opts });
+      await post('/threads/actions', { threadIds: ids.length ? ids : undefined, action, ...opts });
     } finally {
       qc.invalidateQueries({ queryKey: ['threads'] });
       qc.invalidateQueries({ queryKey: ['mailboxes'] });

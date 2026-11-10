@@ -19,7 +19,7 @@ import { badRequest, forbidden, HttpError, notFound } from '../lib/errors';
 import { newId } from '../lib/ids';
 import { parseJson } from '../lib/json';
 import { FOLDERS, type Folder } from '../../shared/constants';
-import { applyThreadAction, getThread, listThreads, messageBody, searchThreads, unreadCounts } from '../services/threads';
+import { applyThreadAction, getThread, listThreadIdsForView, listThreads, messageBody, searchThreads, unreadCounts } from '../services/threads';
 import { getMailbox, mailboxSettings, updateMailbox, bumpState } from '../services/mailboxes';
 import { attachmentBytes } from '../services/send';
 import { contentDisposition, isInlineSafe } from '../mail/decode';
@@ -121,12 +121,27 @@ mail.get('/sender-logos/:domain', async (c) => {
 mail.post('/threads/actions', async (c) => {
   const user = currentUser(c);
   const input = await body(c, threadActionSchema);
-  const rows = await all<{ id: number; mailbox_id: number }>(
-    c.env.DB,
-    `SELECT t.id, t.mailbox_id FROM threads t JOIN mailbox_members mm ON mm.mailbox_id = t.mailbox_id AND mm.user_id = ? WHERE t.id IN (${placeholders(input.threadIds.length)})`,
-    user.id,
-    ...input.threadIds,
-  );
+  let rows: { id: number; mailbox_id: number }[];
+  if (input.allInView && input.view) {
+    const mailboxIds = await mailboxScope(c, input.mailbox);
+    rows = await listThreadIdsForView(c.env.DB, {
+      mailboxIds,
+      view: input.view as Folder | 'label' | 'scheduled' | 'assigned' | 'search',
+      labelId: input.labelId,
+      userId: user.id,
+      query: input.query,
+      excludedThreadIds: input.excludedThreadIds,
+    });
+  } else {
+    const threadIds = input.threadIds ?? [];
+    if (!threadIds.length) return c.json({ ok: true, count: 0 });
+    rows = await all<{ id: number; mailbox_id: number }>(
+      c.env.DB,
+      `SELECT t.id, t.mailbox_id FROM threads t JOIN mailbox_members mm ON mm.mailbox_id = t.mailbox_id AND mm.user_id = ? WHERE t.id IN (${placeholders(threadIds.length)})`,
+      user.id,
+      ...threadIds,
+    );
+  }
   if (input.action === 'assign' && input.userId) {
     const member = await all<{ mailbox_id: number }>(
       c.env.DB,
@@ -272,9 +287,10 @@ mail.post('/messages/:id/unsubscribe', async (c) => {
 
 mail.get('/search', async (c) => {
   const q = (c.req.query('q') ?? '').slice(0, 500);
-  if (!q.trim()) return c.json({ threads: [] });
+  if (!q.trim()) return c.json({ threads: [], total: 0 });
   const mailboxIds = await mailboxScope(c, c.req.query('mailbox'));
-  return c.json({ threads: await searchThreads(c.env.DB, mailboxIds, q) });
+  const threads = await searchThreads(c.env.DB, mailboxIds, q);
+  return c.json({ threads, total: threads.length });
 });
 
 mail.get('/contacts', async (c) => {
