@@ -190,7 +190,7 @@ export interface IngestOptions {
   recipient: Recipient;
   message?: ForwardableEmailMessage; // absent for imports
   ctx?: ExecutionContext;
-  folderOverride?: 'inbox' | 'archive';
+  folderOverride?: 'inbox' | 'archive' | 'trash' | 'spam';
   markRead?: boolean;
   existingRaw?: { key: string; store: 'd1' | 'r2' }; // retry of a message whose raw is already kept
 }

@@ -451,13 +451,44 @@ mail.post('/mailboxes/:id/import', async (c) => {
   if (bytes.byteLength > 25 * 1024 * 1024) throw badRequest('Files over 25 MB cannot be imported.');
   const box = await getMailbox(c.env.DB, mailboxId);
   const settings = await loadSettings(c.env.DB);
+
+  const folderParam = c.req.query('folder');
+  const folderOverride =
+    folderParam === 'inbox' || folderParam === 'archive' || folderParam === 'trash' || folderParam === 'spam'
+      ? folderParam
+      : 'archive';
+
   const r = await ingest({ env: c.env, settings }, bytes, {
     rcpt: box.address,
     envelopeFrom: '',
     recipient: { mailboxId, address: box.address, via: 'exact' },
-    folderOverride: c.req.query('folder') === 'inbox' ? 'inbox' : c.req.query('folder') === 'archive' ? 'archive' : undefined,
+    folderOverride,
     markRead: true,
   });
+
+  // Attach custom labels if provided
+  const labelsQuery = c.req.query('labels');
+  if (r.threadId && labelsQuery) {
+    const rawNames = labelsQuery.split(',').map((s) => s.trim()).filter(Boolean);
+    const labelNames = Array.from(new Set(rawNames)).slice(0, 10); // cap to 10 labels per message
+    for (const name of labelNames) {
+      let label = await first<{ id: number }>(c.env.DB, 'SELECT id FROM labels WHERE mailbox_id = ? AND name = ? COLLATE NOCASE', mailboxId, name);
+      if (!label) {
+        const id = newId();
+        await run(c.env.DB, 'INSERT OR IGNORE INTO labels (id, mailbox_id, name, color, created_at) VALUES (?, ?, ?, ?, ?)', id, mailboxId, name, 'slate', Date.now());
+        label = await first<{ id: number }>(c.env.DB, 'SELECT id FROM labels WHERE mailbox_id = ? AND name = ? COLLATE NOCASE', mailboxId, name);
+      }
+      if (label) {
+        await run(c.env.DB, 'INSERT OR IGNORE INTO thread_labels (thread_id, label_id) VALUES (?, ?)', r.threadId, label.id);
+      }
+    }
+  }
+
+  // Handle starred flag if provided
+  if (r.threadId && c.req.query('starred') === '1') {
+    await run(c.env.DB, 'UPDATE threads SET starred = 1 WHERE id = ?', r.threadId);
+  }
+
   return c.json(r);
 });
 
