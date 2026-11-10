@@ -455,7 +455,7 @@ mail.post('/mailboxes/:id/import', async (c) => {
     rcpt: box.address,
     envelopeFrom: '',
     recipient: { mailboxId, address: box.address, via: 'exact' },
-    folderOverride: c.req.query('folder') === 'inbox' ? 'inbox' : 'archive',
+    folderOverride: c.req.query('folder') === 'inbox' ? 'inbox' : c.req.query('folder') === 'archive' ? 'archive' : undefined,
     markRead: true,
   });
   return c.json(r);
