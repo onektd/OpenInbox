@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
 import { zipSync } from 'fflate';
-import { CalendarClock, Download, FileUp, Funnel, PenLine, Plus, Tag, Trash, Forward } from 'lucide-react';
+import { CalendarClock, Download, FileUp, Funnel, PenLine, Plus, Tag, Trash, Forward, Archive } from 'lucide-react';
 import { del, get, patch, post, put, api, errorText } from '../../lib/api';
 import { useAction, useInvalidate } from '../../lib/hooks';
 import { cleanSignature } from '../../lib/sanitize';
 import { cn, downloadBlob } from '../../lib/utils';
+import { streamMbox, formatMboxEntry } from '../../lib/mbox';
 import { LABEL_COLORS } from '../../../shared/constants';
 import type { Label, Mailbox } from '../../lib/types';
 import { Button } from '../../components/ui/button';
@@ -39,7 +40,7 @@ export const MAIL_SECTIONS: { id: MailSection; label: string; description: strin
   { id: 'forwarding', label: 'Forwarding', description: 'Keep a copy here and forward every message to another address. Forwarding goes through Cloudflare, not your sending quota.' },
   { id: 'labels', label: 'Labels', description: 'Organize conversations. Filters can apply labels automatically.' },
   { id: 'filters', label: 'Filters', description: 'Rules applied to new mail as it arrives, in order.' },
-  { id: 'import-export', label: 'Import & export', description: 'Bring mail from another account as .eml files, or download everything in this inbox as a zip of .eml files.' },
+  { id: 'import-export', label: 'Import & export', description: 'Import mail from Google Takeout (.mbox) or .eml files, or export your inbox as .mbox or .zip.' },
 ];
 
 // One mail section for one inbox. The inbox comes from ?inbox= so the choice survives switching
@@ -376,34 +377,115 @@ function FilterDialog({ box, filter, onClose, onSaved }: { box: Mailbox; filter:
 function ImportExport({ box }: { box: Mailbox }) {
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
   const invalidate = useInvalidate();
 
   const importFiles = async (files: FileList) => {
     setError('');
+    setIsProcessing(true);
     let done = 0;
     let dupes = 0;
-    for (const file of Array.from(files)) {
-      setProgress(`Importing ${done + 1} of ${files.length}…`);
-      try {
-        const r = await api<{ status: string }>(`/mailboxes/${box.id}/import`, { raw: file, headers: { 'Content-Type': 'message/rfc822' } });
-        if (r.status === 'duplicate') dupes++;
-      } catch (e) {
-        setError(`${file.name}: ${errorText(e)}`);
+    let errors = 0;
+
+    try {
+      for (const file of Array.from(files)) {
+        if (file.name.toLowerCase().endsWith('.mbox')) {
+          // Stream-parse mbox archive in constant browser memory
+          for await (const msg of streamMbox(file, 2 * 1024 * 1024, (read, total) => {
+            const pct = Math.round((read / total) * 100);
+            setProgress(`Scanning ${file.name} (${pct}%) — ${done} imported…`);
+          })) {
+            try {
+              setProgress(`Importing message ${msg.index} from ${file.name}…`);
+              const query = msg.isInbox ? '?folder=inbox' : '?folder=archive';
+              const r = await api<{ status: string }>(`/mailboxes/${box.id}/import${query}`, {
+                raw: new Blob([msg.bytes as BlobPart], { type: 'message/rfc822' }),
+                headers: { 'Content-Type': 'message/rfc822' },
+              });
+              if (r.status === 'duplicate') dupes++;
+              done++;
+            } catch (e) {
+              errors++;
+              console.error('Import error for message', msg.index, e);
+            }
+          }
+        } else {
+          // Standard single .eml file
+          setProgress(`Importing ${done + 1} of ${files.length}…`);
+          try {
+            const r = await api<{ status: string }>(`/mailboxes/${box.id}/import?folder=archive`, {
+              raw: file,
+              headers: { 'Content-Type': 'message/rfc822' },
+            });
+            if (r.status === 'duplicate') dupes++;
+            done++;
+          } catch (e) {
+            errors++;
+            setError(`${file.name}: ${errorText(e)}`);
+          }
+        }
       }
-      done++;
+
+      const imported = done - dupes;
+      setProgress(
+        `Import complete: ${imported} message${imported === 1 ? '' : 's'} imported` +
+        (dupes ? ` (${dupes} duplicates skipped)` : '') +
+        (errors ? `, ${errors} failed.` : '.')
+      );
+      invalidate(['threads'], ['mailboxes']);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setIsProcessing(false);
     }
-    setProgress(`Imported ${done - dupes} message${done - dupes === 1 ? '' : 's'}${dupes ? ` (${dupes} already here)` : ''} into Archive.`);
-    invalidate(['threads'], ['mailboxes']);
   };
 
-  const exportAll = async () => {
+  const exportMbox = async () => {
     setError('');
+    setIsProcessing(true);
+    let after = 0;
+    let count = 0;
+    const mboxParts: Uint8Array[] = [];
+
+    try {
+      for (;;) {
+        const page = await get<{ messages: { id: number; subject: string; sent_at: number }[]; next: number | null }>(
+          `/mailboxes/${box.id}/export?after=${after}`
+        );
+        for (const m of page.messages) {
+          setProgress(`Exporting message ${++count}…`);
+          const res = await fetch(`/api/messages/${m.id}/raw`, { credentials: 'same-origin' });
+          if (!res.ok) continue;
+          const raw = new Uint8Array(await res.arrayBuffer());
+          mboxParts.push(formatMboxEntry(raw, new Date(m.sent_at), box.address));
+        }
+        if (!page.next) break;
+        after = page.next;
+      }
+
+      setProgress('Generating .mbox file…');
+      const blob = new Blob(mboxParts as BlobPart[], { type: 'application/mbox' });
+      downloadBlob(blob, `${box.address}-${new Date().toISOString().slice(0, 10)}.mbox`);
+      setProgress(`Exported ${count} messages to .mbox.`);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const exportZip = async () => {
+    setError('');
+    setIsProcessing(true);
     const files: Record<string, Uint8Array> = {};
     let after = 0;
     let count = 0;
+
     try {
       for (;;) {
-        const page = await get<{ messages: { id: number; subject: string; sent_at: number }[]; next: number | null }>(`/mailboxes/${box.id}/export?after=${after}`);
+        const page = await get<{ messages: { id: number; subject: string; sent_at: number }[]; next: number | null }>(
+          `/mailboxes/${box.id}/export?after=${after}`
+        );
         for (const m of page.messages) {
           setProgress(`Downloading message ${++count}…`);
           const res = await fetch(`/api/messages/${m.id}/raw`, { credentials: 'same-origin' });
@@ -418,29 +500,64 @@ function ImportExport({ box }: { box: Mailbox }) {
       setProgress('Creating zip…');
       const zip = zipSync(files, { level: 6 });
       downloadBlob(new Blob([zip as BlobPart], { type: 'application/zip' }), `${box.address}-${new Date().toISOString().slice(0, 10)}.zip`);
-      setProgress(`Exported ${count} messages.`);
+      setProgress(`Exported ${count} messages to .zip.`);
     } catch (e) {
       setError(errorText(e));
-      setProgress(null);
+    } finally {
+      setIsProcessing(false);
     }
   };
 
   return (
     <Card>
-      <CardHeader icon={<Download className="h-5 w-5" />} title="Your mail as .eml files" description="Imported messages go to Archive." />
+      <CardHeader
+        icon={<Download className="h-5 w-5" />}
+        title="Mail Import & Export"
+        description="Transfer your mail using Google Takeout (.mbox) or standard .eml files."
+      />
       <div className="space-y-4 p-5">
         {error && <Alert tone="danger">{error}</Alert>}
         {progress && <Alert tone="neutral">{progress}</Alert>}
         <div className="flex flex-wrap gap-2">
-          <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-surface-2 px-3.5 py-2 text-sm font-medium hover:bg-surface-3">
-            <FileUp className="h-4 w-4" /> Import .eml files
-            <input type="file" accept=".eml,message/rfc822" multiple hidden onChange={(e) => e.target.files && importFiles(e.target.files)} />
+          <label
+            className={cn(
+              'inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-surface-2 px-3.5 py-2 text-sm font-medium hover:bg-surface-3 transition',
+              isProcessing && 'pointer-events-none opacity-50'
+            )}
+          >
+            <FileUp className="h-4 w-4" /> Import .mbox or .eml
+            <input
+              type="file"
+              accept=".mbox,.eml,message/rfc822,application/mbox"
+              multiple
+              hidden
+              disabled={isProcessing}
+              onChange={(e) => {
+                if (e.target.files?.length) {
+                  importFiles(e.target.files);
+                  e.target.value = '';
+                }
+              }}
+            />
           </label>
-          <Button icon={<Download className="h-4 w-4" />} onClick={exportAll}>
-            Export as zip
+          <Button
+            icon={<Archive className="h-4 w-4" />}
+            onClick={exportMbox}
+            disabled={isProcessing}
+          >
+            Export as .mbox (Gmail / Thunderbird)
+          </Button>
+          <Button
+            icon={<Download className="h-4 w-4" />}
+            onClick={exportZip}
+            disabled={isProcessing}
+          >
+            Export as .zip
           </Button>
         </div>
-        <p className="text-xs text-muted">The export runs in your browser, one message at a time, so it works on the free plan for any size of inbox.</p>
+        <p className="text-xs text-muted">
+          All extraction runs locally in your browser chunk-by-chunk with low memory usage, allowing multi-gigabyte Google Takeout files to be imported safely into your free Cloudflare Worker.
+        </p>
       </div>
     </Card>
   );
