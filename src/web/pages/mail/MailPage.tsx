@@ -47,6 +47,9 @@ function MailApp() {
   const list = useMemo(() => threads.data?.pages.flatMap((p) => p.threads) ?? [], [threads.data]);
   const act = useThreadActions();
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [allInViewSelected, setAllInViewSelected] = useState(false);
+  const [allOnPageSelected, setAllOnPageSelected] = useState(false);
+  const [excludedIds, setExcludedIds] = useState<Set<number>>(new Set());
   const [focusIndex, setFocusIndex] = useState(0);
   const [drawer, setDrawer] = useState(false);
   const [composers, setComposers] = useState<ComposeState[]>([]);
@@ -57,6 +60,9 @@ function MailApp() {
 
   useEffect(() => {
     setSelected(new Set());
+    setAllInViewSelected(false);
+    setAllOnPageSelected(false);
+    setExcludedIds(new Set());
     setFocusIndex(0);
   }, [mailboxParam, view, query]);
 
@@ -235,6 +241,23 @@ function MailApp() {
         return;
       }
       const leave = () => threadId && navigate(`${base}${suffix}`);
+      const actHelper = (action: Parameters<typeof act>[1], opts: Parameters<typeof act>[2] = {}) => {
+        if (allInViewSelected) {
+          return act([], action, {
+            ...opts,
+            allInView: true,
+            mailbox: mailboxParam,
+            view,
+            query,
+            labelId: view.startsWith('label-') ? Number(view.slice(6)) : undefined,
+            excludedThreadIds: excludedIds.size ? [...excludedIds] : undefined,
+          });
+        }
+        if (target.length) {
+          return act(target, action, opts);
+        }
+        return Promise.resolve();
+      };
       switch (e.key) {
         case 'c':
           e.preventDefault();
@@ -272,41 +295,63 @@ function MailApp() {
         case 'u':
         case 'Escape':
           if (threadId) navigate(`${base}${suffix}`);
-          else setSelected(new Set());
+          else {
+            setSelected(new Set());
+            setAllInViewSelected(false);
+            setAllOnPageSelected(false);
+            setExcludedIds(new Set());
+          }
           break;
         case 'x':
           if (focused) {
-            const n = new Set(selected);
-            if (n.has(focused.id)) n.delete(focused.id);
-            else n.add(focused.id);
-            setSelected(n);
+            if (allInViewSelected) {
+              const next = new Set(excludedIds);
+              if (next.has(focused.id)) next.delete(focused.id);
+              else next.add(focused.id);
+              setExcludedIds(next);
+            } else {
+              setAllOnPageSelected(false);
+              const n = new Set(selected);
+              if (n.has(focused.id)) n.delete(focused.id);
+              else n.add(focused.id);
+              setSelected(n);
+            }
           }
           break;
         case 'e':
-          if (target.length) act(target, view === 'archive' ? 'inbox' : 'archive').then(() => toast.success(view === 'archive' ? 'Moved to Inbox' : 'Archived'));
+          if (target.length || allInViewSelected) actHelper(view === 'archive' ? 'inbox' : 'archive').then(() => toast.success(view === 'archive' ? 'Moved to Inbox' : 'Archived'));
           setSelected(new Set());
+          setAllInViewSelected(false);
+          setAllOnPageSelected(false);
+          setExcludedIds(new Set());
           leave();
           break;
         case '#':
-          if (target.length) act(target, 'trash').then(() => toast.success('Moved to Trash'));
+          if (target.length || allInViewSelected) actHelper('trash').then(() => toast.success('Moved to Trash'));
           setSelected(new Set());
+          setAllInViewSelected(false);
+          setAllOnPageSelected(false);
+          setExcludedIds(new Set());
           leave();
           break;
         case '!':
-          if (target.length) act(target, 'spam').then(() => toast.success('Marked as spam'));
+          if (target.length || allInViewSelected) actHelper('spam').then(() => toast.success('Marked as spam'));
           setSelected(new Set());
+          setAllInViewSelected(false);
+          setAllOnPageSelected(false);
+          setExcludedIds(new Set());
           leave();
           break;
         case 's': {
           const t = list.find((x) => x.id === target[0]);
-          if (target.length) act(target, t?.starred ? 'unstar' : 'star');
+          if (target.length || allInViewSelected) actHelper(t?.starred ? 'unstar' : 'star');
           break;
         }
         case 'I':
-          if (target.length) act(target, 'read');
+          if (target.length || allInViewSelected) actHelper('read');
           break;
         case 'U':
-          if (target.length) act(target, 'unread');
+          if (target.length || allInViewSelected) actHelper('unread');
           break;
         case 'r':
         case 'a':
@@ -320,7 +365,7 @@ function MailApp() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [list, focusIndex, selected, threadId, view, base, suffix, mailboxParam, navigate, openCompose, openThread, act, toast]);
+  }, [list, focusIndex, selected, allInViewSelected, allOnPageSelected, excludedIds, threadId, view, base, suffix, mailboxParam, query, navigate, openCompose, openThread, act, toast]);
 
   // The browser tab shows the unread count.
   useEffect(() => {
@@ -367,6 +412,12 @@ function MailApp() {
           setFocusIndex={setFocusIndex}
           selected={selected}
           setSelected={setSelected}
+          allInViewSelected={allInViewSelected}
+          setAllInViewSelected={setAllInViewSelected}
+          allOnPageSelected={allOnPageSelected}
+          setAllOnPageSelected={setAllOnPageSelected}
+          excludedIds={excludedIds}
+          setExcludedIds={setExcludedIds}
           onOpen={openThread}
           onSearch={onSearch}
           onMenu={() => setDrawer(true)}

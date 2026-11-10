@@ -146,13 +146,22 @@ export const composeSchema = z.object({
 
 export const sendSchema = z.object({ sendAt: z.number().int().nullable().optional() });
 
-export const threadActionSchema = z.object({
-  threadIds: z.array(id).min(1).max(500),
-  action: z.enum(['read', 'unread', 'star', 'unstar', 'archive', 'inbox', 'spam', 'notspam', 'trash', 'delete', 'snooze', 'unsnooze', 'label', 'unlabel', 'assign']),
-  labelId: id.optional(),
-  until: z.number().int().optional(),
-  userId: id.nullable().optional(),
-});
+export const threadActionSchema = z
+  .object({
+    threadIds: z.array(id).max(500).optional(),
+    action: z.enum(['read', 'unread', 'star', 'unstar', 'archive', 'inbox', 'spam', 'notspam', 'trash', 'delete', 'snooze', 'unsnooze', 'label', 'unlabel', 'assign']),
+    labelId: id.optional(),
+    until: z.number().int().optional(),
+    userId: id.nullable().optional(),
+    allInView: z.boolean().optional(),
+    mailbox: z.string().optional(),
+    view: z.string().optional(),
+    query: z.string().optional(),
+    excludedThreadIds: z.array(id).optional(),
+  })
+  .refine((data) => (data.threadIds && data.threadIds.length > 0) || (data.allInView && data.view), {
+    message: 'Either threadIds or allInView with view must be provided.',
+  });
 
 export const labelSchema = z.object({ name: z.string().trim().min(1).max(60), color: z.enum(LABEL_COLORS).default('slate') });
 
