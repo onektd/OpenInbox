@@ -38,6 +38,12 @@ export function ThreadList({
   setFocusIndex,
   selected,
   setSelected,
+  allInViewSelected,
+  setAllInViewSelected,
+  allOnPageSelected,
+  setAllOnPageSelected,
+  excludedIds,
+  setExcludedIds,
   onOpen,
   onSearch,
   onMenu,
@@ -53,6 +59,12 @@ export function ThreadList({
   setFocusIndex: (i: number) => void;
   selected: Set<number>;
   setSelected: (s: Set<number>) => void;
+  allInViewSelected: boolean;
+  setAllInViewSelected: (v: boolean) => void;
+  allOnPageSelected: boolean;
+  setAllOnPageSelected: (v: boolean) => void;
+  excludedIds: Set<number>;
+  setExcludedIds: (s: Set<number>) => void;
   onOpen: (t: ThreadSummary) => void;
   onSearch: (q: string) => void;
   onMenu: () => void;
@@ -91,6 +103,17 @@ export function ThreadList({
     container.current?.querySelector(`[data-index="${focusIndex}"]`)?.scrollIntoView({ block: 'nearest' });
   }, [focusIndex]);
 
+  // Keep selection synchronized as infinite scroll loads more mail.
+  const prevListLengthRef = useRef(list.length);
+  useEffect(() => {
+    if (list.length > prevListLengthRef.current) {
+      if (allOnPageSelected || allInViewSelected) {
+        setSelected(new Set(list.map((t) => t.id)));
+      }
+    }
+    prevListLengthRef.current = list.length;
+  }, [list, allOnPageSelected, allInViewSelected, setSelected]);
+
   const runSearch = (text: string) => {
     const t = text.trim();
     if (t) {
@@ -104,20 +127,60 @@ export function ThreadList({
   };
 
   const ids = [...selected];
+  const totalCount = q.data?.pages[0]?.total ?? list.length;
+  const selectedCount = allInViewSelected
+    ? Math.max(0, totalCount - excludedIds.size)
+    : ids.length;
+
   const bulk = (action: Action, opts: Parameters<typeof act>[2] = {}, label?: string) => {
-    if (!ids.length) return;
-    act(ids, action, opts)
-      .then(() => label && toast.success(label))
-      .catch(() => toast.error('Something went wrong.'));
-    setSelected(new Set());
+    if (!ids.length && !allInViewSelected) return;
+    if (allInViewSelected) {
+      act([], action, {
+        ...opts,
+        allInView: true,
+        mailbox,
+        view,
+        query,
+        labelId: view.startsWith('label-') ? Number(view.slice(6)) : undefined,
+        excludedThreadIds: excludedIds.size ? [...excludedIds] : undefined,
+      })
+        .then(() => label && toast.success(label))
+        .catch(() => toast.error('Something went wrong.'));
+      setSelected(new Set());
+      setAllInViewSelected(false);
+      setAllOnPageSelected(false);
+      setExcludedIds(new Set());
+    } else {
+      act(ids, action, opts)
+        .then(() => label && toast.success(label))
+        .catch(() => toast.error('Something went wrong.'));
+      setSelected(new Set());
+      setAllOnPageSelected(false);
+      setExcludedIds(new Set());
+    }
   };
+
   const toggle = (id: number) => {
+    if (allInViewSelected) {
+      const nextExcluded = new Set(excludedIds);
+      if (nextExcluded.has(id)) {
+        nextExcluded.delete(id);
+      } else {
+        nextExcluded.add(id);
+      }
+      setExcludedIds(nextExcluded);
+      return;
+    }
+    setAllOnPageSelected(false);
     const n = new Set(selected);
     if (n.has(id)) n.delete(id);
     else n.add(id);
     setSelected(n);
   };
-  const allSelected = list.length > 0 && list.every((t) => selected.has(t.id));
+
+  const allSelected = list.length > 0 && list.every((t) => (allInViewSelected ? !excludedIds.has(t.id) : selected.has(t.id)));
+  const isMasterChecked = allInViewSelected ? excludedIds.size === 0 : allSelected;
+  const isMasterIndeterminate = allInViewSelected ? excludedIds.size > 0 : !allSelected && ids.length > 0;
   const title = view.startsWith('label-') ? (labelsById.get(Number(view.slice(6)))?.name ?? 'Label') : (VIEW_LABELS[view] ?? view);
   const mailboxName = mailbox === 'all' ? (mailboxes.length > 1 ? 'All inboxes' : '') : (mailboxes.find((m) => String(m.id) === mailbox)?.address ?? '');
   const heading = view === 'search' ? `Results for “${query}”` : title;
@@ -230,8 +293,32 @@ export function ThreadList({
 
       {ids.length ? (
         <div className="flex h-10 shrink-0 items-center gap-0.5 border-y border-border bg-primary-soft pr-2 pl-3.5 md:border-t-0">
-          <Tick checked={allSelected} indeterminate={!allSelected} onChange={(v) => setSelected(v ? new Set(list.map((t) => t.id)) : new Set())} label="Select all" className="mr-2" />
-          <span className="flex-1 truncate text-[13px] font-semibold text-primary-text">{ids.length} selected</span>
+          <Tick
+            checked={isMasterChecked}
+            indeterminate={isMasterIndeterminate}
+            onChange={(v) => {
+              if (v) {
+                if (allInViewSelected) {
+                  setExcludedIds(new Set());
+                } else {
+                  setAllOnPageSelected(true);
+                  setSelected(new Set(list.map((t) => t.id)));
+                }
+              } else {
+                setAllInViewSelected(false);
+                setAllOnPageSelected(false);
+                setExcludedIds(new Set());
+                setSelected(new Set());
+              }
+            }}
+            label="Select all"
+            className="mr-2"
+          />
+          <span className="flex-1 truncate text-[13px] font-semibold text-primary-text">
+            {allInViewSelected && excludedIds.size === 0
+              ? `All ${totalCount.toLocaleString()} selected`
+              : `${selectedCount.toLocaleString()} selected`}
+          </span>
           <IconButton label="Archive" shortcut="E" onClick={() => bulk('archive', {}, 'Archived')} icon={<Archive />} className="h-7 w-7" />
           <IconButton
             label={view === 'trash' ? 'Delete forever' : 'Delete'}
@@ -273,7 +360,17 @@ export function ThreadList({
       ) : (
         // One heading for both layouts: large on phones, a compact list header on desktop.
         <div className="flex shrink-0 items-baseline gap-2.5 px-[18px] pt-1.5 pb-2.5 md:h-10 md:items-center md:border-b md:border-border md:pt-0 md:pr-2.5 md:pb-0 md:pl-3.5">
-          <Tick checked={false} onChange={(v) => v && setSelected(new Set(list.map((t) => t.id)))} label="Select all" className="max-md:hidden" />
+          <Tick
+            checked={false}
+            onChange={(v) => {
+              setAllInViewSelected(false);
+              setAllOnPageSelected(v);
+              setExcludedIds(new Set());
+              if (v) setSelected(new Set(list.map((t) => t.id)));
+            }}
+            label="Select all"
+            className="max-md:hidden"
+          />
           <div className="min-w-0 flex-1 truncate text-xl font-semibold tracking-[-0.02em] md:text-[13px] md:tracking-normal">
             {heading}
             {mailboxName && <span className="text-[13px] font-normal tracking-normal text-faint max-md:ml-2 md:before:content-['_·_']">{mailboxName}</span>}
@@ -284,6 +381,68 @@ export function ThreadList({
             </Button>
           )}
           <IconButton label="Refresh" onClick={() => q.refetch()} icon={<RefreshCw className={cn(q.isFetching && 'animate-spin text-primary-text')} />} className="h-7 w-7 max-md:hidden" />
+        </div>
+      )}
+
+      {ids.length > 0 && (allInViewSelected || (allSelected && totalCount > list.length)) && (
+        <div className="flex shrink-0 items-center justify-center border-b border-border bg-surface-2 px-3 py-2 text-center text-xs text-muted animate-fade-in">
+          {!allInViewSelected ? (
+            <span>
+              All {list.length} {list.length === 1 ? 'conversation' : 'conversations'} on this page are selected.{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setAllInViewSelected(true);
+                  setAllOnPageSelected(true);
+                  setExcludedIds(new Set());
+                  setSelected(new Set(list.map((t) => t.id)));
+                }}
+                className="cursor-pointer font-medium text-primary hover:underline"
+              >
+                Select all {totalCount.toLocaleString()} {totalCount === 1 ? 'conversation' : 'conversations'} in {view === 'search' ? heading : title}
+              </button>
+            </span>
+          ) : excludedIds.size > 0 ? (
+            <span>
+              {selectedCount.toLocaleString()} {selectedCount === 1 ? 'conversation' : 'conversations'} in {view === 'search' ? heading : title} selected.{' '}
+              <button
+                type="button"
+                onClick={() => setExcludedIds(new Set())}
+                className="cursor-pointer font-medium text-primary hover:underline"
+              >
+                Select all {totalCount.toLocaleString()} {totalCount === 1 ? 'conversation' : 'conversations'}
+              </button>
+              <span className="mx-1.5 text-border">|</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelected(new Set());
+                  setAllInViewSelected(false);
+                  setAllOnPageSelected(false);
+                  setExcludedIds(new Set());
+                }}
+                className="cursor-pointer font-medium text-primary hover:underline"
+              >
+                Clear selection
+              </button>
+            </span>
+          ) : (
+            <span>
+              All {totalCount.toLocaleString()} {totalCount === 1 ? 'conversation' : 'conversations'} in {view === 'search' ? heading : title} are selected.{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setSelected(new Set());
+                  setAllInViewSelected(false);
+                  setAllOnPageSelected(false);
+                  setExcludedIds(new Set());
+                }}
+                className="cursor-pointer font-medium text-primary hover:underline"
+              >
+                Clear selection
+              </button>
+            </span>
+          )}
         </div>
       )}
 
@@ -347,7 +506,7 @@ export function ThreadList({
             {list.map((t, i) => {
               const unread = t.unreadCount > 0;
               const active = activeId === t.id;
-              const isSelected = selected.has(t.id);
+              const isSelected = allInViewSelected ? !excludedIds.has(t.id) : selected.has(t.id);
               const participants = view === 'sent' || view === 'drafts' ? participantLabel(t.participants, new Set()) : participantLabel(t.participants, own);
               const first = t.participants.find((p) => !own.has(p.address.toLowerCase())) ?? t.participants[0];
               const strong = unread || active;
@@ -459,13 +618,10 @@ export function ThreadList({
         confirmLabel="Delete forever"
         onConfirm={() => {
           setConfirmEmpty(false);
-          act(
-            list.map((t) => t.id),
-            'delete',
-          ).then(() => toast.success('Emptied'));
+          act([], 'delete', { allInView: true, mailbox, view }).then(() => toast.success('Emptied'));
         }}
       >
-        The {list.length} conversations here are deleted forever. This can't be undone.
+        The {totalCount.toLocaleString()} {totalCount === 1 ? 'conversation' : 'conversations'} here are deleted forever. This can't be undone.
       </ConfirmDialog>
     </div>
   );

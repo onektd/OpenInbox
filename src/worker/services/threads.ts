@@ -123,10 +123,105 @@ function decodeCursor(cursor: string | null | undefined): { t: number; id: numbe
   return Number.isFinite(t) && Number.isFinite(id) ? { t, id } : null;
 }
 
-export async function listThreads(db: D1Database, p: ListParams): Promise<{ threads: ThreadSummary[]; nextCursor: string | null }> {
+async function countThreadsForView(db: D1Database, p: Omit<ListParams, 'cursor' | 'limit'>): Promise<number> {
+  if (!p.mailboxIds.length) return 0;
+  if (p.view === 'label') {
+    if (!p.labelId) return 0;
+    const r = await first<{ n: number }>(
+      db,
+      `SELECT COUNT(*) AS n FROM thread_labels tl JOIN threads t ON t.id = tl.thread_id
+        WHERE tl.label_id = ? AND t.mailbox_id IN (${placeholders(p.mailboxIds.length)}) AND t.folder != 'trash'`,
+      p.labelId,
+      ...p.mailboxIds,
+    );
+    return r?.n ?? 0;
+  }
+  if (p.view === 'scheduled') {
+    const r = await first<{ n: number }>(
+      db,
+      `SELECT COUNT(DISTINCT thread_id) AS n FROM messages WHERE status = 'scheduled' AND mailbox_id IN (${placeholders(p.mailboxIds.length)})`,
+      ...p.mailboxIds,
+    );
+    return r?.n ?? 0;
+  }
+  if (p.view === 'assigned') {
+    const r = await first<{ n: number }>(
+      db,
+      `SELECT COUNT(*) AS n FROM threads WHERE mailbox_id IN (${placeholders(p.mailboxIds.length)}) AND assigned_to = ? AND folder != 'trash'`,
+      ...p.mailboxIds,
+      p.userId ?? 0,
+    );
+    return r?.n ?? 0;
+  }
+  const { where } = viewSql(p.view);
+  const r = await first<{ n: number }>(
+    db,
+    `SELECT COUNT(*) AS n FROM threads WHERE mailbox_id IN (${placeholders(p.mailboxIds.length)}) AND ${where}`,
+    ...p.mailboxIds,
+  );
+  return r?.n ?? 0;
+}
+
+export async function listThreadIdsForView(
+  db: D1Database,
+  p: {
+    mailboxIds: number[];
+    view: Folder | 'label' | 'scheduled' | 'assigned' | 'search';
+    labelId?: number;
+    userId?: number;
+    query?: string;
+    excludedThreadIds?: number[];
+  },
+): Promise<{ id: number; mailbox_id: number }[]> {
+  if (!p.mailboxIds.length) return [];
+  let rows: { id: number; mailbox_id: number }[];
+  if (p.view === 'search') {
+    const summaries = await searchThreads(db, p.mailboxIds, p.query ?? '', 500);
+    rows = summaries.map((s) => ({ id: s.id, mailbox_id: s.mailboxId }));
+  } else if (p.view === 'label') {
+    if (!p.labelId) return [];
+    rows = await all<{ id: number; mailbox_id: number }>(
+      db,
+      `SELECT t.id, t.mailbox_id FROM thread_labels tl JOIN threads t ON t.id = tl.thread_id
+        WHERE tl.label_id = ? AND t.mailbox_id IN (${placeholders(p.mailboxIds.length)}) AND t.folder != 'trash'`,
+      p.labelId,
+      ...p.mailboxIds,
+    );
+  } else if (p.view === 'scheduled') {
+    rows = await all<{ id: number; mailbox_id: number }>(
+      db,
+      `SELECT DISTINCT t.id, t.mailbox_id FROM messages m JOIN threads t ON t.id = m.thread_id
+        WHERE m.status = 'scheduled' AND t.mailbox_id IN (${placeholders(p.mailboxIds.length)})`,
+      ...p.mailboxIds,
+    );
+  } else if (p.view === 'assigned') {
+    rows = await all<{ id: number; mailbox_id: number }>(
+      db,
+      `SELECT id, mailbox_id FROM threads
+        WHERE mailbox_id IN (${placeholders(p.mailboxIds.length)}) AND assigned_to = ? AND folder != 'trash'`,
+      ...p.mailboxIds,
+      p.userId ?? 0,
+    );
+  } else {
+    const { where } = viewSql(p.view);
+    rows = await all<{ id: number; mailbox_id: number }>(
+      db,
+      `SELECT id, mailbox_id FROM threads WHERE mailbox_id IN (${placeholders(p.mailboxIds.length)}) AND ${where}`,
+      ...p.mailboxIds,
+    );
+  }
+  if (p.excludedThreadIds?.length) {
+    const excluded = new Set(p.excludedThreadIds);
+    return rows.filter((r) => !excluded.has(r.id));
+  }
+  return rows;
+}
+
+export async function listThreads(db: D1Database, p: ListParams): Promise<{ threads: ThreadSummary[]; nextCursor: string | null; total: number }> {
   const limit = Math.min(Math.max(p.limit ?? 50, 1), 100);
-  if (!p.mailboxIds.length) return { threads: [], nextCursor: null };
+  if (!p.mailboxIds.length) return { threads: [], nextCursor: null, total: 0 };
   const cursor = decodeCursor(p.cursor);
+  const totalPromise = countThreadsForView(db, p);
   let rows: ThreadRow[];
 
   if (p.view === 'label') {
@@ -172,7 +267,8 @@ export async function listThreads(db: D1Database, p: ListParams): Promise<{ thre
   const page = rows.slice(0, limit);
   const last = page[page.length - 1];
   const sortKey = p.view === 'sent' ? last?.last_sent_at : p.view === 'snoozed' ? last?.snoozed_until : last?.last_message_at;
-  return { threads: await withLabels(db, page), nextCursor: more && last ? `${sortKey}.${last.id}` : null };
+  const total = await totalPromise;
+  return { threads: await withLabels(db, page), nextCursor: more && last ? `${sortKey}.${last.id}` : null, total };
 }
 
 export async function unreadCounts(db: D1Database, mailboxIds: number[]): Promise<Record<number, Record<string, number>>> {
@@ -360,6 +456,20 @@ export type ThreadAction =
   | 'assign';
 
 export async function applyThreadAction(
+  env: Env,
+  settings: AppSettings,
+  threads: { id: number; mailboxId: number }[],
+  action: ThreadAction,
+  opts: { labelId?: number; until?: number; userId?: number | null },
+): Promise<void> {
+  if (!threads.length) return;
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < threads.length; i += CHUNK_SIZE) {
+    await applyThreadActionChunk(env, settings, threads.slice(i, i + CHUNK_SIZE), action, opts);
+  }
+}
+
+async function applyThreadActionChunk(
   env: Env,
   settings: AppSettings,
   threads: { id: number; mailboxId: number }[],
