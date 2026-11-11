@@ -24,10 +24,10 @@ export function ProfileSettings() {
   );
 }
 
-export function AppearanceSettings() {
+export function PreferencesSettings() {
   return (
     <div className="space-y-6">
-      <PageHeader title="Appearance" description="Theme and desktop notifications for this browser." />
+      <PageHeader title="Preferences" description="Theme, start page and notifications for this browser." />
       <Appearance />
     </div>
   );
@@ -79,6 +79,9 @@ function Profile() {
 
 function Appearance() {
   const [theme, setTheme] = useTheme();
+  const user = useUser();
+  const isAdmin = user?.role === 'owner' || user?.role === 'admin';
+  const [home, setHome] = useState<'admin' | 'mail'>(storageGet('oi.homePage', 'admin'));
   const [notify, setNotify] = useState(storageGet('oi.notify', false));
   const toggleNotify = async (on: boolean) => {
     if (on && 'Notification' in window && Notification.permission !== 'granted') {
@@ -103,6 +106,21 @@ function Appearance() {
             ]}
           />
         </Field>
+        {isAdmin && (
+          <Field label="Start page" hint="Where OpenInbox opens when you visit the app URL.">
+            <SegmentedControl
+              value={home}
+              onChange={(v) => {
+                setHome(v);
+                storageSet('oi.homePage', v);
+              }}
+              options={[
+                { value: 'admin', label: 'Admin' },
+                { value: 'mail', label: 'Mail' },
+              ]}
+            />
+          </Field>
+        )}
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 text-sm font-medium">

@@ -1,12 +1,12 @@
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router';
-import { CalendarClock, Download, Forward, Funnel, MonitorSmartphone, Palette, PenLine, ShieldCheck, Tag, UserRound } from 'lucide-react';
+import { CalendarClock, Download, Forward, Funnel, MonitorSmartphone, PenLine, ShieldCheck, SlidersHorizontal, Tag, UserRound } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { AppearanceSettings, DevicesSettings, ProfileSettings, SecuritySettings } from './AccountSettings';
+import { PreferencesSettings, DevicesSettings, ProfileSettings, SecuritySettings } from './AccountSettings';
 import { MAIL_SECTIONS, MailboxSettings, type MailSection } from './MailboxSettings';
 
 const ACCOUNT = [
   { to: 'profile', label: 'Profile', Icon: UserRound, element: <ProfileSettings /> },
-  { to: 'appearance', label: 'Appearance', Icon: Palette, element: <AppearanceSettings /> },
+  { to: 'preferences', label: 'Preferences', Icon: SlidersHorizontal, element: <PreferencesSettings /> },
   { to: 'security', label: 'Security', Icon: ShieldCheck, element: <SecuritySettings /> },
   { to: 'devices', label: 'Devices', Icon: MonitorSmartphone, element: <DevicesSettings /> },
 ];
@@ -59,6 +59,7 @@ export default function SettingsPage() {
               <Route key={m.id} path={m.id} element={<MailboxSettings section={m.id} />} />
             ))}
             {/* Older links. */}
+            <Route path="appearance" element={<Navigate to="/settings/preferences" replace />} />
             <Route path="account" element={<Navigate to="/settings/profile" replace />} />
             <Route path="mailboxes/*" element={<Navigate to="/settings/signature" replace />} />
             <Route path="*" element={<Navigate to="/settings/profile" replace />} />
