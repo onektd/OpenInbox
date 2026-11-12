@@ -36,8 +36,9 @@ export function ProfileSettings() {
 export function AppearanceSettings() {
   return (
     <div className="space-y-6">
-      <PageHeader title="Appearance" description="Theme and desktop notifications for this browser." />
+      <PageHeader title="Appearance" description="Theme, start page and desktop notifications." />
       <Appearance />
+      <StartPage />
     </div>
   );
 }
@@ -81,6 +82,30 @@ function Profile() {
             Save
           </Button>
         </div>
+      </div>
+    </Card>
+  );
+}
+
+function StartPage() {
+  const user = useUser();
+  const [home, setHome] = useState<'admin' | 'mail'>(storageGet('oi.homePage', 'admin'));
+  if (user?.role !== 'owner' && user?.role !== 'admin') return null;
+  return (
+    <Card>
+      <CardHeader title="Start page" description="Where OpenInbox opens from the app URL, logo and instance name (this browser only)." />
+      <div className="p-5">
+        <SegmentedControl
+          value={home}
+          onChange={(v) => {
+            setHome(v);
+            storageSet('oi.homePage', v);
+          }}
+          options={[
+            { value: 'admin', label: 'Admin' },
+            { value: 'mail', label: 'Mail' },
+          ]}
+        />
       </div>
     </Card>
   );
