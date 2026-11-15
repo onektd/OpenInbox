@@ -1,25 +1,28 @@
-import { lazy, Suspense, useEffect } from 'react';
-import { Navigate, Route, Routes } from 'react-router';
-import { useSession } from './lib/session';
-import { errorText } from './lib/api';
-import { storageGet } from './lib/utils';
-import { PageSpinner } from './components/ui/misc';
-import { Button } from './components/ui/button';
-import { SetupPage } from './pages/setup/SetupPage';
-import { LoginPage } from './pages/auth/LoginPage';
-import { RecoverPage } from './pages/auth/RecoverPage';
-import { TwoFactorPage } from './pages/auth/TwoFactorPage';
-import { ChangePasswordPage } from './pages/auth/ChangePasswordPage';
-import { AppShell } from './components/layout/AppShell';
+import { lazy, Suspense, useEffect } from "react";
+import { Navigate, Route, Routes } from "react-router";
+import { useSession } from "./lib/session";
+import { errorText } from "./lib/api";
+import { storageGet } from "./lib/utils";
+import { PageSpinner } from "./components/ui/misc";
+import { Button } from "./components/ui/button";
+import { SetupPage } from "./pages/setup/SetupPage";
+import { LoginPage } from "./pages/auth/LoginPage";
+import { RecoverPage } from "./pages/auth/RecoverPage";
+import { TwoFactorPage } from "./pages/auth/TwoFactorPage";
+import { ChangePasswordPage } from "./pages/auth/ChangePasswordPage";
+import { AppShell } from "./components/layout/AppShell";
 
 // Larger areas load on demand (the mail client pulls in the rich text editor).
-const MailPage = lazy(() => import('./pages/mail/MailPage'));
-const AdminRoutes = lazy(() => import('./pages/admin/AdminRoutes'));
-const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'));
+const MailPage = lazy(() => import("./pages/mail/MailPage"));
+const AdminRoutes = lazy(() => import("./pages/admin/AdminRoutes"));
+const SettingsPage = lazy(() => import("./pages/settings/SettingsPage"));
 
 // Reads the saved start page on every visit to "/" (logo click, bare URL), so a changed setting applies immediately.
 function HomeRedirect({ isAdmin }: { isAdmin: boolean }) {
-  const home = isAdmin && storageGet<'admin' | 'mail'>('oi.homePage', 'admin') === 'admin' ? '/admin' : '/mail';
+  const home =
+    isAdmin && storageGet<"admin" | "mail">("oi.homePage", "admin") === "admin"
+      ? "/admin"
+      : "/mail";
   return <Navigate to={home} replace />;
 }
 
@@ -31,13 +34,16 @@ export function App() {
     let link = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
     if (favicon) {
       if (!link) {
-        link = document.createElement('link');
-        link.rel = 'icon';
+        link = document.createElement("link");
+        link.rel = "icon";
         document.head.appendChild(link);
       }
+      // A custom favicon may be PNG or ICO: let the browser detect the type.
+      link.removeAttribute("type");
       link.href = favicon;
-    } else if (link && link.getAttribute('href') !== '/favicon.svg') {
-      link.href = '/favicon.svg';
+    } else if (link && link.getAttribute("href") !== "/favicon.svg") {
+      link.type = "image/svg+xml";
+      link.href = "/favicon.svg";
     }
   }, [session?.faviconUrl]);
 
@@ -45,7 +51,9 @@ export function App() {
   if (!session) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-sm text-muted">OpenInbox could not reach its API: {errorText(error)}</p>
+        <p className="text-sm text-muted">
+          OpenInbox could not reach its API: {errorText(error)}
+        </p>
         <Button onClick={() => refetch()}>Try again</Button>
       </div>
     );
@@ -63,13 +71,21 @@ export function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/recover" element={<RecoverPage />} />
-        <Route path="*" element={<Navigate to={`/login${location.pathname !== '/' ? `?next=${encodeURIComponent(location.pathname + location.search)}` : ''}`} replace />} />
+        <Route
+          path="*"
+          element={
+            <Navigate
+              to={`/login${location.pathname !== "/" ? `?next=${encodeURIComponent(location.pathname + location.search)}` : ""}`}
+              replace
+            />
+          }
+        />
       </Routes>
     );
   }
   if (user.mfaPending) return <TwoFactorPage />;
   if (user.mustChangePassword) return <ChangePasswordPage forced />;
-  const isAdmin = user.role === 'owner' || user.role === 'admin';
+  const isAdmin = user.role === "owner" || user.role === "admin";
   return (
     <Suspense fallback={<PageSpinner />}>
       <Routes>
